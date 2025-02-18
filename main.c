@@ -9,6 +9,7 @@
 #endif
 
 #include <CL/cl.h>
+#include "lodepng.h"
 
 #define MAX_PLATFORMS 10
 #define MAX_INFO_SIZE 1024
@@ -45,6 +46,99 @@ void print_matrix(float* matrix) {
             printf("%.2f ", matrix[i * SIZE + j]);
         }
         printf("\n");
+    }
+}
+
+unsigned char* ReadImage(const char* filename, unsigned* width, unsigned* height) {
+    unsigned char* image = NULL;
+    unsigned error = lodepng_decode32_file(&image, width, height, filename);
+    if (error) {
+        printf("Error reading image %s: %s\n", filename, lodepng_error_text(error));
+        exit(1);
+    }
+    return image;
+}
+
+unsigned char* ResizeImage(const unsigned char* image, unsigned width, unsigned height, unsigned* new_width, unsigned* new_height) {
+    *new_width = width / 4;
+    *new_height = height / 4;
+    unsigned char* resized_image = (unsigned char*)malloc(*new_width * *new_height * 4 * sizeof(unsigned char));
+
+    if (resized_image == NULL) {
+        printf("Memory allocation failed for resized_image.\n");
+        exit(1);
+    }
+
+    for (unsigned y = 0; y < *new_height; y++) {
+        for (unsigned x = 0; x < *new_width; x++) {
+            unsigned src_index = (y * 4 * width + x * 4) * 4;
+            unsigned dst_index = (y * *new_width + x) * 4;
+            resized_image[dst_index] = image[src_index];         // R
+            resized_image[dst_index + 1] = image[src_index + 1]; // G
+            resized_image[dst_index + 2] = image[src_index + 2]; // B
+            resized_image[dst_index + 3] = image[src_index + 3]; // A
+        }
+    }
+    return resized_image;
+}
+
+unsigned char* GrayScaleImage(const unsigned char* image, unsigned width, unsigned height) {
+    unsigned char* gray_image = (unsigned char*)malloc(width * height * sizeof(unsigned char));
+
+    if (gray_image == NULL) {
+        printf("Memory allocation failed for gray_image.\n");
+        exit(1);
+    }
+
+    for (unsigned y = 0; y < height; y++) {
+        for (unsigned x = 0; x < width; x++) {
+            unsigned index = (y * width + x) * 4;
+            unsigned char r = image[index];
+            unsigned char g = image[index + 1];
+            unsigned char b = image[index + 2];
+            gray_image[y * width + x] = (unsigned char)(0.2126 * r + 0.7152 * g + 0.0722 * b);
+        }
+    }
+    return gray_image;
+}
+
+
+unsigned char* ApplyFilter(const unsigned char* image, unsigned width, unsigned height) {
+    unsigned char* filtered_image = (unsigned char*)malloc(width * height * sizeof(unsigned char));
+    int kernel[5][5] = {
+        {2, 4, 6, 4, 2},
+        {4, 16, 24, 16, 4},
+        {6, 24, 36, 24, 6},
+        {4, 16, 24, 16, 4},
+        {2, 4, 6, 4, 2}
+    };
+    int kernel_sum = 256;
+
+    if (filtered_image == NULL) {
+        printf("Memory allocation failed for gray_image.\n");
+        exit(1);
+    }
+
+    for (unsigned y = 2; y < height - 2; y++) {
+        for (unsigned x = 2; x < width - 2; x++) {
+            int sum = 0;
+            for (int ky = -2; ky <= 2; ky++) {
+                for (int kx = -2; kx <= 2; kx++) {
+                    sum += image[(y + ky) * width + (x + kx)] * kernel[ky + 2][kx + 2];
+                }
+            }
+            filtered_image[y * width + x] = (unsigned char)(sum / kernel_sum);
+        }
+    }
+    return filtered_image;
+}
+
+// Function to write an image using LodePNG
+void WriteImage(const char* filename, const unsigned char* image, unsigned width, unsigned height) {
+    unsigned error = lodepng_encode_file(filename, image, width, height, LCT_GREY, 8);
+    if (error) {
+        printf("Error writing image %s: %s\n", filename, lodepng_error_text(error));
+        exit(1);
     }
 }
 
@@ -223,6 +317,58 @@ int matrix_addtion_test() {
     return 0;
 }
 
+int read_image_test() {
+    const char* input_filenames[] = { "image_0.png", "image_1.png" };
+    const char* output_filenames[] = { "image_0_bw.png", "image_1_bw.png" };
+
+    for (int i = 0; i < 2; i++) {
+        const char* input_filename = input_filenames[i];
+        const char* output_filename = output_filenames[i];
+        unsigned width, height, new_width, new_height;
+
+        // Read image
+        double start_time = get_time();
+        unsigned char* image = ReadImage(input_filename, &width, &height);
+        double end_time = get_time();
+        printf("Time to read image %s: %.6f seconds\n", input_filename, end_time - start_time);
+
+        // Resize image
+        start_time = get_time();
+        unsigned char* resized_image = ResizeImage(image, width, height, &new_width, &new_height);
+        end_time = get_time();
+        printf("Time to resize image %s: %.6f seconds\n", input_filename, end_time - start_time);
+
+        // Convert to grayscale
+        start_time = get_time();
+        unsigned char* gray_image = GrayScaleImage(resized_image, new_width, new_height);
+        end_time = get_time();
+        printf("Time to convert to grayscale %s: %.6f seconds\n", input_filename, end_time - start_time);
+
+        // Apply 5x5 filter
+        start_time = get_time();
+        unsigned char* filtered_image = ApplyFilter(gray_image, new_width, new_height);
+        end_time = get_time();
+        printf("Time to apply filter %s: %.6f seconds\n", input_filename, end_time - start_time);
+
+        // Write image
+        start_time = get_time();
+        WriteImage(output_filename, filtered_image, new_width, new_height);
+        end_time = get_time();
+        printf("Time to write image %s: %.6f seconds\n", output_filename, end_time - start_time);
+
+        // Free memory
+        free(image);
+        free(resized_image);
+        free(gray_image);
+        free(filtered_image);
+
+        printf("\n");
+    }
+
+    return 0;
+}
+
 int main() {
-    return matrix_addtion_test();
+    // return matrix_addtion_test();
+	return read_image_test();
 }
