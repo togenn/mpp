@@ -318,7 +318,7 @@ int matrix_addtion_test() {
 }
 
 int read_image_test() {
-    const char* input_filenames[] = { "image_0.png", "image_1.png" };
+    const char* input_filenames[] = { "im0.png", "im1.png" };
     const char* output_filenames[] = { "image_0_bw.png", "image_1_bw.png" };
 
     for (int i = 0; i < 2; i++) {
