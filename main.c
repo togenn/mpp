@@ -9,7 +9,7 @@
 #endif
 
 #include <CL/cl.h>
-#include "lodepng.h"
+#include "lodepng/lodepng.h"
 
 #define MAX_PLATFORMS 10
 #define MAX_INFO_SIZE 1024
@@ -106,11 +106,11 @@ unsigned char* GrayScaleImage(const unsigned char* image, unsigned width, unsign
 unsigned char* ApplyFilter(const unsigned char* image, unsigned width, unsigned height) {
     unsigned char* filtered_image = (unsigned char*)malloc(width * height * sizeof(unsigned char));
     int kernel[5][5] = {
-        {2, 4, 6, 4, 2},
+        {1, 4, 6, 4, 1},
         {4, 16, 24, 16, 4},
         {6, 24, 36, 24, 6},
         {4, 16, 24, 16, 4},
-        {2, 4, 6, 4, 2}
+        {1, 4, 6, 4, 1}
     };
     int kernel_sum = 256;
 
@@ -163,6 +163,58 @@ void check_error(cl_int err, const char* operation) {
         printf("Error during operation '%s' (Error Code: %d)\n", operation, err);
         exit(1);
     }
+}
+
+
+//more logging for build errors
+void check_build_error(cl_int err, cl_program program, cl_device_id device, const char* operation) {
+    if (err != CL_SUCCESS) {
+        size_t log_size;
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        char* log = (char*)malloc(log_size);
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, log_size, log, NULL);
+        printf("Error during operation '%s' (Error Code: %d)\n", operation, err);
+        printf("Build Log:\n%s\n", log);
+        free(log);
+        exit(1);
+    }
+}
+
+// foolproofed reading of kernel holy hell
+char* read_kernel_source(const char* filename, size_t* size) {
+	FILE* file = fopen(filename, "rb"); // open in binary mode why not brrrrrrrr
+    if (!file) {
+        printf("Failed to open kernel file: %s\n", filename);
+        exit(1);
+    }
+
+    fseek(file, 0, SEEK_END);
+    *size = ftell(file);
+    if (*size == (size_t)-1) {
+        printf("Error determining file size: %s\n", filename);
+        fclose(file);
+        exit(1);
+    }
+    rewind(file);
+
+    char* source = (char*)malloc(*size + 1);
+    if (!source) {
+        printf("Memory allocation failed for kernel source.\n");
+        fclose(file);
+        exit(1);
+    }
+
+    size_t bytesRead = fread(source, 1, *size, file);
+    if (bytesRead != *size) {
+        printf("Error: Only read %zu out of %zu bytes from kernel file: %s\n", bytesRead, *size, filename);
+        free(source);
+        fclose(file);
+        exit(1);
+    }
+
+    source[*size] = '\0';
+    fclose(file);
+    return source;
 }
 
 int matrix_addtion_test() {
@@ -326,49 +378,181 @@ int read_image_test() {
         const char* output_filename = output_filenames[i];
         unsigned width, height, new_width, new_height;
 
-        // Read image
-        double start_time = get_time();
+        double total_start_time = get_time();
+
+		// Read image
         unsigned char* image = ReadImage(input_filename, &width, &height);
-        double end_time = get_time();
-        printf("Time to read image %s: %.6f seconds\n", input_filename, end_time - start_time);
 
-        // Resize image
-        start_time = get_time();
+		// Resize image
         unsigned char* resized_image = ResizeImage(image, width, height, &new_width, &new_height);
-        end_time = get_time();
-        printf("Time to resize image %s: %.6f seconds\n", input_filename, end_time - start_time);
 
-        // Convert to grayscale
-        start_time = get_time();
+		// Convert to grayscale
         unsigned char* gray_image = GrayScaleImage(resized_image, new_width, new_height);
-        end_time = get_time();
-        printf("Time to convert to grayscale %s: %.6f seconds\n", input_filename, end_time - start_time);
 
-        // Apply 5x5 filter
-        start_time = get_time();
+		// Apply 5x5 filter
         unsigned char* filtered_image = ApplyFilter(gray_image, new_width, new_height);
-        end_time = get_time();
-        printf("Time to apply filter %s: %.6f seconds\n", input_filename, end_time - start_time);
 
-        // Write image
-        start_time = get_time();
+		// Write image
         WriteImage(output_filename, filtered_image, new_width, new_height);
-        end_time = get_time();
-        printf("Time to write image %s: %.6f seconds\n", output_filename, end_time - start_time);
 
-        // Free memory
+		// Free memory
         free(image);
         free(resized_image);
         free(gray_image);
         free(filtered_image);
 
+		// Total time
+        double total_end_time = get_time();
+        printf("total time for processing image %s: %.6f seconds\n", input_filename, total_end_time - total_start_time);
         printf("\n");
     }
 
     return 0;
 }
 
+void process_image_opencl(const char* input_filename, const char* output_filename) {
+    unsigned width, height, new_width, new_height;
+    unsigned char* image = ReadImage(input_filename, &width, &height);
+    new_width = width / 4;
+    new_height = height / 4;
+    size_t image_size = width * height * 4;
+    size_t gray_size = new_width * new_height;
+    cl_platform_id platform;
+    cl_device_id device;
+    cl_context context;
+    cl_command_queue queue;
+    cl_int err;
+
+    double total_start_time = get_time();
+
+    err = clGetPlatformIDs(1, &platform, NULL);
+    check_error(err, "Getting Platform");
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+    check_error(err, "Getting Device");
+    context = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
+    check_error(err, "Creating Context");
+    queue = clCreateCommandQueueWithProperties(context, device, (cl_queue_properties[]) { CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE, 0 }, & err);
+    check_error(err, "Creating Queue");
+
+    // create buffers
+    cl_mem d_image = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, image_size, image, &err);
+    check_error(err, "Creating Image Buffer");
+    cl_mem d_gray = clCreateBuffer(context, CL_MEM_WRITE_ONLY, gray_size * sizeof(cl_uchar4), NULL, &err);
+    check_error(err, "Creating Gray Buffer");
+    cl_mem d_filtered = clCreateBuffer(context, CL_MEM_WRITE_ONLY, gray_size * sizeof(cl_uchar), NULL, &err);
+    check_error(err, "Creating Filter Buffer");
+
+    // define filter kernel and create buffer
+    int filter[5][5] = {
+        {1, 4, 6, 4, 1},
+        {4, 16, 24, 16, 4},
+        {6, 24, 36, 24, 6},
+        {4, 16, 24, 16, 4},
+        {1, 4, 6, 4, 1}
+    };
+
+    cl_mem d_kernel = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(int) * 5 * 5, filter, &err);
+    check_error(err, "Creating Kernel Buffer");
+
+    // load and build resize kernel
+    size_t resize_size;
+    char* resize_source = read_kernel_source("resize.cl", &resize_size);
+
+
+    cl_program resize_program = clCreateProgramWithSource(context, 1, (const char**)&resize_source, NULL, &err);
+    check_error(err, "Creating Resize Program");
+    free(resize_source);
+    err = clBuildProgram(resize_program, 1, &device, NULL, NULL, NULL);
+    check_build_error(err, resize_program, device, "Building Resize Program");
+    cl_kernel resize_kernel = clCreateKernel(resize_program, "resize_image", &err);
+    check_error(err, "Creating Resize Kernel");
+
+    // execute resize kernel
+    size_t global_size[2] = { new_width, new_height };
+    clSetKernelArg(resize_kernel, 0, sizeof(cl_mem), &d_image);
+    clSetKernelArg(resize_kernel, 1, sizeof(cl_mem), &d_gray);
+    clSetKernelArg(resize_kernel, 2, sizeof(int), &width);
+    clSetKernelArg(resize_kernel, 3, sizeof(int), &height);
+    clSetKernelArg(resize_kernel, 4, sizeof(int), &new_width);
+    clSetKernelArg(resize_kernel, 5, sizeof(int), &new_height);
+    cl_event resize_event;
+    err = clEnqueueNDRangeKernel(queue, resize_kernel, 2, NULL, global_size, NULL, 0, NULL, &resize_event);
+    check_error(err, "Running Resize Kernel");
+    clWaitForEvents(1, &resize_event);
+
+    // load and build grayscale kernel
+    size_t grayscale_size;
+    char* grayscale_source = read_kernel_source("grayscale.cl", &grayscale_size);
+    cl_program grayscale_program = clCreateProgramWithSource(context, 1, (const char**)&grayscale_source, NULL, &err);
+    check_error(err, "Creating Grayscale Program");
+    free(grayscale_source);
+    err = clBuildProgram(grayscale_program, 1, &device, NULL, NULL, NULL);
+    check_build_error(err, grayscale_program, device, "Building Grayscale Program");
+    cl_kernel grayscale_kernel = clCreateKernel(grayscale_program, "grayscale_image", &err);
+    check_error(err, "Creating Grayscale Kernel");
+
+    // execute grayscale kernel
+    clSetKernelArg(grayscale_kernel, 0, sizeof(cl_mem), &d_gray);
+    clSetKernelArg(grayscale_kernel, 1, sizeof(cl_mem), &d_filtered);
+    clSetKernelArg(grayscale_kernel, 2, sizeof(int), &new_width);
+    clSetKernelArg(grayscale_kernel, 3, sizeof(int), &new_height);
+    cl_event grayscale_event;
+    err = clEnqueueNDRangeKernel(queue, grayscale_kernel, 2, NULL, global_size, NULL, 0, NULL, &grayscale_event);
+    check_error(err, "Running Grayscale Kernel");
+    clWaitForEvents(1, &grayscale_event);
+
+    // load and build filter kernel
+    size_t filter_size;
+    char* filter_source = read_kernel_source("filter.cl", &filter_size);
+    cl_program filter_program = clCreateProgramWithSource(context, 1, (const char**)&filter_source, NULL, &err);
+    check_error(err, "Creating Filter Program");
+    free(filter_source);
+    err = clBuildProgram(filter_program, 1, &device, NULL, NULL, NULL);
+    check_build_error(err, filter_program, device, "Building Filter Program");
+    cl_kernel filter_kernel = clCreateKernel(filter_program, "apply_filter", &err);
+    check_error(err, "Creating Filter Kernel");
+
+    // execute filter kernel
+    clSetKernelArg(filter_kernel, 0, sizeof(cl_mem), &d_filtered);
+    clSetKernelArg(filter_kernel, 1, sizeof(cl_mem), &d_filtered);
+    clSetKernelArg(filter_kernel, 2, sizeof(cl_mem), &d_kernel);
+    clSetKernelArg(filter_kernel, 3, sizeof(int), &new_width);
+    clSetKernelArg(filter_kernel, 4, sizeof(int), &new_height);
+    cl_event filter_event;
+    err = clEnqueueNDRangeKernel(queue, filter_kernel, 2, NULL, global_size, NULL, 0, NULL, &filter_event);
+    check_error(err, "Running Filter Kernel");
+    clWaitForEvents(1, &filter_event);
+
+    // read the output image
+    unsigned char* output_image = (unsigned char*)malloc(gray_size);
+    clEnqueueReadBuffer(queue, d_filtered, CL_TRUE, 0, gray_size, output_image, 0, NULL, NULL);
+    WriteImage(output_filename, output_image, new_width, new_height);
+
+    // end total timing for the entire process
+    double total_end_time = get_time();
+    printf("Total time for processing image %s: %.6f seconds\n", input_filename, total_end_time - total_start_time);
+    printf("\n");
+
+    // cleanup
+    clReleaseMemObject(d_image);
+    clReleaseMemObject(d_gray);
+    clReleaseMemObject(d_filtered);
+    clReleaseMemObject(d_kernel);
+    clReleaseKernel(resize_kernel);
+    clReleaseKernel(grayscale_kernel);
+    clReleaseKernel(filter_kernel);
+    clReleaseProgram(resize_program);
+    clReleaseProgram(grayscale_program);
+    clReleaseProgram(filter_program);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
+    free(image);
+    free(output_image);
+}
+
 int main() {
-    // return matrix_addtion_test();
-	return read_image_test();
+    read_image_test();
+	process_image_opencl("im0.png", "image_0_bw.png");
+	process_image_opencl("im1.png", "image_1_bw.png");  
+    return 0;
 }

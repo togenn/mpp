@@ -26,5 +26,30 @@
     <None Include="add_matrix.cl">
       <Filter>Source Files</Filter>
     </None>
+    <None Include="grayscale.cl">
+      <Filter>Source Files</Filter>
+    </None>
+    <None Include=".gitignore" />
+    <None Include="filter.cl" />
+    <None Include="resize.cl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="lodepng\lodepng.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="im0.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="im1.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="image_0_bw.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="image_1_bw.png">
+      <Filter>Resource Files</Filter>
+    </Image>
   </ItemGroup>
 </Project>

@@ -107,13 +107,13 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>C:\Users\peral\source\repos\mpp\mpp\lodepng;C:\Program Files %28x86%29\OCL_SDK_Light\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Program Files %28x86%29\OCL_SDK_Light\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\lib\x64;D:\Koodinperkeleet\MPP\lodepng;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>C:\Program Files %28x86%29\OCL_SDK_Light\lib\x86_64;C:\Program Files %28x86%29\OCL_SDK_Light\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>OpenCL.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\lib\x64\OpenCL.lib";%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -137,7 +137,20 @@
     <ClCompile Include="main.c" />
   </ItemGroup>
   <ItemGroup>
+    <None Include=".gitignore" />
     <None Include="add_matrix.cl" />
+    <None Include="filter.cl" />
+    <None Include="grayscale.cl" />
+    <None Include="resize.cl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="lodepng\lodepng.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="im0.png" />
+    <Image Include="im1.png" />
+    <Image Include="image_0_bw.png" />
+    <Image Include="image_1_bw.png" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
