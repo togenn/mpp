@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <math.h>
+#include <limits.h>
+#include <float.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -13,29 +16,32 @@
 
 #define MAX_PLATFORMS 10
 #define MAX_INFO_SIZE 1024
-#define SIZE 100
+#define TEST_MATRIX_SIZE 100
+
+#define WINDOW_SIZE 9
+#define MAX_DISPARITY (260 / 4)
 
 void displayPlatformInfo(cl_platform_id platform, cl_platform_info param_name, const char* param_str) {
     char info[MAX_INFO_SIZE];
     size_t info_size;
 
     clGetPlatformInfo(platform, param_name, sizeof(info), info, &info_size);
-    info[info_size] = '\0'; // Ensure null termination
+    info[info_size] = '\0';
     printf("%s: %s\n", param_str, info);
 }
 
 float* allocate_matrix() {
-    return (float*)malloc(SIZE * SIZE * sizeof(float));
+    return (float*)malloc(TEST_MATRIX_SIZE * TEST_MATRIX_SIZE * sizeof(float));
 }
 
 void initialize_matrix(float* matrix) {
-    for (int i = 0; i < SIZE * SIZE; i++) {
+    for (int i = 0; i < TEST_MATRIX_SIZE * TEST_MATRIX_SIZE; i++) {
         matrix[i] = (float)(i % 10);
     }
 }
 
 void add_Matrix(float* matrix_1, float* matrix_2, float* result) {
-    for (int i = 0; i < SIZE * SIZE; i++) {
+    for (int i = 0; i < TEST_MATRIX_SIZE * TEST_MATRIX_SIZE; i++) {
         result[i] = matrix_1[i] + matrix_2[i];
     }
 }
@@ -43,7 +49,7 @@ void add_Matrix(float* matrix_1, float* matrix_2, float* result) {
 void print_matrix(float* matrix) {
     for (int i = 0; i < 10; i++) {
         for (int j = 0; j < 10; j++) {
-            printf("%.2f ", matrix[i * SIZE + j]);
+            printf("%.2f ", matrix[i * TEST_MATRIX_SIZE + j]);
         }
         printf("\n");
     }
@@ -307,10 +313,10 @@ int matrix_addtion_test() {
 
     // Allocate device memory
     cl_mem d_matrix_1 = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-        SIZE * SIZE * sizeof(float), matrix_1, NULL);
+        TEST_MATRIX_SIZE * TEST_MATRIX_SIZE * sizeof(float), matrix_1, NULL);
     cl_mem d_matrix_2 = clCreateBuffer(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-        SIZE * SIZE * sizeof(float), matrix_2, NULL);
-    cl_mem d_result = clCreateBuffer(context, CL_MEM_WRITE_ONLY, SIZE * SIZE * sizeof(float), NULL, NULL);
+        TEST_MATRIX_SIZE * TEST_MATRIX_SIZE * sizeof(float), matrix_2, NULL);
+    cl_mem d_result = clCreateBuffer(context, CL_MEM_WRITE_ONLY, TEST_MATRIX_SIZE * TEST_MATRIX_SIZE * sizeof(float), NULL, NULL);
 
     // Set kernel arguments
     clSetKernelArg(kernel, 0, sizeof(cl_mem), &d_matrix_1);
@@ -318,7 +324,7 @@ int matrix_addtion_test() {
     clSetKernelArg(kernel, 2, sizeof(cl_mem), &d_result);
 
     // Define global work size
-    size_t global_size[2] = { SIZE, SIZE };
+    size_t global_size[2] = { TEST_MATRIX_SIZE, TEST_MATRIX_SIZE };
 
     // Create event for profiling
     cl_event event;
@@ -338,13 +344,13 @@ int matrix_addtion_test() {
     double execution_time_ms = (end_time_cl - start_time_cl) / 1e6;
 
     // Copy result back to host
-    check_error(clEnqueueReadBuffer(queue, d_result, CL_TRUE, 0, SIZE * SIZE * sizeof(float), result, 0, NULL, NULL), "Reading result");
+    check_error(clEnqueueReadBuffer(queue, d_result, CL_TRUE, 0, TEST_MATRIX_SIZE * TEST_MATRIX_SIZE * sizeof(float), result, 0, NULL, NULL), "Reading result");
 
     // Print a portion of the result
     printf("Result Matrix (First 10x10 elements):\n");
     for (int i = 0; i < 10; i++) {
         for (int j = 0; j < 10; j++) {
-            printf("%.2f ", result[i * SIZE + j]);
+            printf("%.2f ", result[i * TEST_MATRIX_SIZE + j]);
         }
         printf("\n");
     }
@@ -550,9 +556,208 @@ void process_image_opencl(const char* input_filename, const char* output_filenam
     free(output_image);
 }
 
+float compute_mean(const unsigned char* img, unsigned width, unsigned x, unsigned y, unsigned win_size) {
+    float sum = 0.0;
+    for (int j = -(int)win_size / 2; j <= (int)win_size / 2; j++) {
+        for (int i = -(int)win_size / 2; i <= (int)win_size / 2; i++) {
+            sum += img[(y + j) * width + (x + i)];
+        }
+    }
+    return sum / (win_size * win_size);
+}
+
+float compute_zncc(const unsigned char* left, const unsigned char* right, unsigned width, unsigned x, unsigned y, int d, unsigned win_size) {
+    float meanL = compute_mean(left, width, x, y, win_size);
+    float meanR = compute_mean(right, width, x - d, y, win_size);
+
+    float numerator = 0.0f;
+    float denomL = 0.0f;
+    float denomR = 0.0f;
+
+    for (int j = -(int)win_size / 2; j <= (int)win_size / 2; j++) {
+        for (int i = -(int)win_size / 2; i <= (int)win_size / 2; i++) {
+            float l_val = left[(y + j) * width + (x + i)] - meanL;
+            float r_val = right[(y + j) * width + (x + i - d)] - meanR;
+            numerator += l_val * r_val;
+            denomL += l_val * l_val;
+            denomR += r_val * r_val;
+        }
+    }
+    return numerator / (sqrtf(denomL * denomR));
+}
+
+unsigned char* compute_disparity(const unsigned char* left, const unsigned char* right, unsigned width, unsigned height, int reverse) {
+    unsigned char* disparity_map = (unsigned char*)malloc(width * height * sizeof(unsigned char));
+
+    for (unsigned y = WINDOW_SIZE / 2; y < height - WINDOW_SIZE / 2; y++) {
+        for (unsigned x = WINDOW_SIZE / 2; x < width - WINDOW_SIZE / 2; x++) {
+            float max_zncc = -FLT_MAX;
+            unsigned char best_d = 0;
+
+            for (unsigned d = 0; d <= MAX_DISPARITY; d++) {
+                if ((!reverse && x < d + (int)(WINDOW_SIZE / 2)) || (reverse && x + d >= width - (int)(WINDOW_SIZE / 2))) continue;
+
+                float zncc_val = compute_zncc(
+                    reverse ? right : left,
+                    reverse ? left : right,
+                    width,
+                    x,
+                    y,
+                    reverse ? -(int)d : (int)d,
+                    WINDOW_SIZE
+                );
+
+                if (zncc_val > max_zncc) {
+                    max_zncc = zncc_val;
+                    best_d = (unsigned char)(abs(d) * 255 / MAX_DISPARITY); // Store positive disparity
+                }
+            }
+
+            disparity_map[y * width + x] = best_d;
+        }
+    }
+
+    return disparity_map;
+}
+
+// Perform cross-checking to consolidate disparity maps
+unsigned char* cross_check_disparity(const unsigned char* left_disparity, const unsigned char* right_disparity, unsigned width, unsigned height, unsigned threshold) {
+    unsigned char* consolidated_map = (unsigned char*)malloc(width * height * sizeof(unsigned char));
+
+    for (unsigned y = 0; y < height; y++) {
+        for (unsigned x = 0; x < width; x++) {
+            unsigned char dL = left_disparity[y * width + x];
+            unsigned char dR = right_disparity[y * width + x];
+
+            if (abs(dL - dR) > threshold) {
+                consolidated_map[y * width + x] = 0;
+            }
+            else {
+                consolidated_map[y * width + x] = dL;
+            }
+        }
+    }
+
+    return consolidated_map;
+}
+
+
+int is_valid_pixel(unsigned char val) {
+    return val > 0;
+}
+
+void occlusion_filling(unsigned char* disparity_map, unsigned width, unsigned height) {
+    unsigned char* filled_disparity = (unsigned char*)malloc(width * height * sizeof(unsigned char));
+    if (!filled_disparity) {
+        printf("Memory allocation failed.\n");
+        return;
+    }
+
+    memcpy(filled_disparity, disparity_map, width * height * sizeof(unsigned char));
+
+    for (unsigned y = 0; y < height; y++) {
+        for (unsigned x = 0; x < width; x++) {
+            if (disparity_map[y * width + x] == 0) {
+                unsigned char candidates[4] = { 0, 0, 0, 0 };
+                float weights[4] = { 0, 0, 0, 0 };
+
+                // Scan left
+                for (int lx = x - 1; lx >= 0; lx--) {
+                    if (is_valid_pixel(disparity_map[y * width + lx])) {
+                        candidates[0] = disparity_map[y * width + lx];
+                        weights[0] = 1.0f / (x - lx);
+                        break;
+                    }
+                }
+
+                // Scan right
+                for (int rx = x + 1; rx < (int)width; rx++) {
+                    if (is_valid_pixel(disparity_map[y * width + rx])) {
+                        candidates[1] = disparity_map[y * width + rx];
+                        weights[1] = 1.0f / (rx - x);
+                        break;
+                    }
+                }
+
+                // Scan up
+                for (int uy = y - 1; uy >= 0; uy--) {
+                    if (is_valid_pixel(disparity_map[uy * width + x])) {
+                        candidates[2] = disparity_map[uy * width + x];
+                        weights[2] = 1.0f / (y - uy);
+                        break;
+                    }
+                }
+
+                // Scan down
+                for (int dy = y + 1; dy < (int)height; dy++) {
+                    if (is_valid_pixel(disparity_map[dy * width + x])) {
+                        candidates[3] = disparity_map[dy * width + x];
+                        weights[3] = 1.0f / (dy - y);
+                        break;
+                    }
+                }
+
+                float weighted_sum = 0.0f;
+                float total_weight = 0.0f;
+
+                for (int i = 0; i < 4; i++) {
+                    if (candidates[i] > 0) {
+                        weighted_sum += candidates[i] * weights[i];
+                        total_weight += weights[i];
+                    }
+                }
+
+                if (total_weight > 0) {
+                    filled_disparity[y * width + x] = (unsigned char)(weighted_sum / total_weight);
+                }
+            }
+        }
+    }
+
+    memcpy(disparity_map, filled_disparity, width * height * sizeof(unsigned char));
+    free(filled_disparity);
+}
+
 int main() {
-    read_image_test();
-	process_image_opencl("im0.png", "image_0_bw.png");
-	process_image_opencl("im1.png", "image_1_bw.png");  
+    unsigned width, height, new_width, new_height;
+
+    unsigned char* left_image = ReadImage("im0.png", &width, &height);
+    unsigned char* right_image = ReadImage("im1.png", &width, &height);
+
+    double start_time = get_time();
+
+    unsigned char* left_resized = ResizeImage(left_image, width, height, &new_width, &new_height);
+    unsigned char* right_resized = ResizeImage(right_image, width, height, &new_width, &new_height);
+
+    unsigned char* left_gray = GrayScaleImage(left_resized, new_width, new_height);
+    unsigned char* right_gray = GrayScaleImage(right_resized, new_width, new_height);
+
+    unsigned char* left_filtered = ApplyFilter(left_gray, new_width, new_height);
+    unsigned char* right_filtered = ApplyFilter(right_gray, new_width, new_height);
+
+    unsigned char* left_disparity = compute_disparity(left_filtered, right_filtered, new_width, new_height, 0);
+    unsigned char* right_disparity = compute_disparity(left_filtered, right_filtered, new_width, new_height, 1);
+
+    unsigned char* consolidated_disparity = cross_check_disparity(left_disparity, right_disparity, new_width, new_height, 8);
+    occlusion_filling(consolidated_disparity, new_width, new_height);
+
+    double end_time = get_time();
+
+    printf("Execution time %f seconds", end_time - start_time);
+    // Execution time 37.296770 seconds with ryzen 7 5800x3d
+
+    WriteImage("disparity_map.png", left_disparity, new_width, new_height);
+    WriteImage("disparity_map2.png", right_disparity, new_width, new_height);
+    WriteImage("final_disparity.png", consolidated_disparity, new_width, new_height);
+
+    free(left_image);
+    free(right_image);
+    free(left_resized);
+    free(right_resized);
+    free(left_gray);
+    free(right_gray);
+    free(left_disparity);
+    free(right_disparity);
+
     return 0;
 }
