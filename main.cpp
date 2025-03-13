@@ -600,9 +600,6 @@ unsigned char* compute_disparity(const unsigned char* left, const unsigned char*
 
     #pragma omp parallel for collapse(3)
     for (int y = WINDOW_SIZE / 2; y < height - WINDOW_SIZE / 2; y++) {
-        if (omp_get_thread_num() == 0) {
-            printf("Using %d threads\n", omp_get_num_threads());
-        }
         for (unsigned x = WINDOW_SIZE / 2; x < width - WINDOW_SIZE / 2; x++) {
             float max_zncc = -FLT_MAX;
             unsigned char best_d = 0;
@@ -660,7 +657,7 @@ void occlusion_filling(unsigned char* disparity_map, unsigned width, unsigned he
     }
 }
 
-int main() {
+void stereo_disparity_cpp() {
     unsigned width, height, new_width, new_height;
     unsigned char* left_image = ReadImage("im0.png", &width, &height);
     unsigned char* right_image = ReadImage("im1.png", &width, &height);
@@ -693,5 +690,10 @@ int main() {
     free(left_gray); free(right_gray);
     free(left_disparity); free(right_disparity);
     free(consolidated_disparity);
+}
+
+int main() {
+    stereo_disparity_cpp();
+
     return 0;
 }
