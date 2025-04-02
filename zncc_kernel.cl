@@ -1,105 +1,66 @@
 __kernel void zncc_kernel(
-    global const unsigned char* leftImg,
-    global const unsigned char* rightImg,
-    global unsigned char* disparityImg,
-    int width, int height, int winSize, int maxDisp)
+    __global const unsigned char* leftImg,
+    __global const unsigned char* rightImg,
+    __global unsigned char* disparityImg,
+    const int width, const int height, 
+    const int winSize, const int maxDisp, const int reverse)
 {
-    int idx = get_global_id(0);
-    int x = idx % width;
-    int y = idx / width;
+    int x = get_global_id(0);
+    int y = get_global_id(1);
 
-    // only valid pixels
-    if (x < winSize / 2 || x >= width - winSize / 2 || y < winSize / 2 || y >= height - winSize / 2) {
+    if (x < winSize / 2 || x >= width - winSize / 2 || 
+        y < winSize / 2 || y >= height - winSize / 2)
+    {
+        disparityImg[y * width + x] = 0;
         return;
     }
 
-    double maxZncc = -1.0;
-    int bestDisp = 0;
+    float maxZNCC = -FLT_MAX;
+    unsigned char bestD = 0;
 
-    // calculate mean for the left image at pixel (x, y)
-    double meanL = 0.0;
-    int halfWin = winSize / 2;
-    for (int j = -halfWin; j <= halfWin; j++) {
-        for (int i = -halfWin; i <= halfWin; i++) {
-            meanL += leftImg[(y + j) * width + (x + i)];
-        }
-    }
-    meanL /= (winSize * winSize);
+    for (int d = 0; d <= maxDisp; d++) {
+        if ((!reverse && x < d + winSize / 2) || 
+            (reverse && x + d >= width - winSize / 2)) continue;
 
-    if (maxDisp > 0) {
-        // left image is reference
-        for (int d = 0; d < maxDisp; d++) {
-            if (x - d < 0) continue;
+        float sumL = 0.0, sumR = 0.0, sumL2 = 0.0, sumR2 = 0.0, sumLR = 0.0;
+        int count = 0;
 
-            // calculate mean for the right image at pixel (x, y)
-            double meanR = 0.0;
-            for (int j = -halfWin; j <= halfWin; j++) {
-                for (int i = -halfWin; i <= halfWin; i++) {
-                    meanR += rightImg[(y + j) * width + (x + i - d)];
-                }
-            }
-            meanR /= (winSize * winSize);
+        for (int j = -winSize / 2; j <= winSize / 2; j++) {
+            for (int i = -winSize / 2; i <= winSize / 2; i++) {
+                int leftX = x + i;
+                int leftY = y + j;
+                int rightX = (reverse) ? leftX + d : leftX - d;
 
-            // compute the ZNCC between the left and right image patches
-            double numerator = 0.0;
-            double denomL = 0.0;
-            double denomR = 0.0;
-            for (int j = -halfWin; j <= halfWin; j++) {
-                for (int i = -halfWin; i <= halfWin; i++) {
-                    double l_val = leftImg[(y + j) * width + (x + i)] - meanL;
-                    double r_val = rightImg[(y + j) * width + (x + i - d)] - meanR;
-                    numerator += l_val * r_val;
-                    denomL += l_val * l_val;
-                    denomR += r_val * r_val;
-                }
-            }
+                if (rightX < 0 || rightX >= width) continue;
 
-            // calculate ZNCC score
-            double znccVal = numerator / (sqrt(denomL * denomR) + 1e-5);
+                float leftVal = leftImg[leftY * width + leftX];
+                float rightVal = rightImg[leftY * width + rightX];
 
-            if (znccVal > maxZncc) {
-                maxZncc = znccVal;
-                bestDisp = d;
+                sumL += leftVal;
+                sumR += rightVal;
+                sumL2 += leftVal * leftVal;
+                sumR2 += rightVal * rightVal;
+                sumLR += leftVal * rightVal;
+                count++;
             }
         }
-    }
-    else {
-        // right image is reference
-        for (int d = 0; d > maxDisp; d--) {
-            if (x - d >= width) continue;
 
-            // calculate mean for the right image at pixel (x, y)
-            double meanR = 0.0;
-            for (int j = -halfWin; j <= halfWin; j++) {
-                for (int i = -halfWin; i <= halfWin; i++) {
-                    meanR += rightImg[(y + j) * width + (x + i - d)];
-                }
-            }
-            meanR /= (winSize * winSize);
+        if (count == 0) continue;
 
-            // calculate mean for the left image at pixel (x, y)
-            double numerator = 0.0;
-            double denomL = 0.0;
-            double denomR = 0.0;
-            for (int j = -halfWin; j <= halfWin; j++) {
-                for (int i = -halfWin; i <= halfWin; i++) {
-                    double l_val = leftImg[(y + j) * width + (x + i)] - meanL;
-                    double r_val = rightImg[(y + j) * width + (x + i - d)] - meanR;
-                    numerator += l_val * r_val;
-                    denomL += l_val * l_val;
-                    denomR += r_val * r_val;
-                }
-            }
+        float meanL = sumL / count;
+        float meanR = sumR / count;
 
-            // calculate ZNCC score
-            double znccVal = numerator / (sqrt(denomL * denomR) + 1e-5);
+        float varL = sumL2 - count * meanL * meanL;
+        float varR = sumR2 - count * meanR * meanR;
+        float covLR = sumLR - count * meanL * meanR;
 
-            if (znccVal > maxZncc) {
-                maxZncc = znccVal;
-                bestDisp = d;
-            }
+        float zncc = covLR / (sqrt(varL * varR) + 1e-5f);
+
+        if (zncc > maxZNCC) {
+            maxZNCC = zncc;
+            bestD = (unsigned char)(d * 255 / maxDisp);
         }
     }
 
-    disparityImg[idx] = (unsigned char)(bestDisp + abs(maxDisp));
+    disparityImg[y * width + x] = bestD;
 }
