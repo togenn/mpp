@@ -743,8 +743,6 @@ void stereo_disparity_opencl(const char* left_image_path, const char* right_imag
     unsigned char* left_image = ReadImage(left_image_path, &width, &height);
     unsigned char* right_image = ReadImage(right_image_path, &width, &height);
 
-    double start_time = omp_get_wtime();
-
     new_width = width / 4;
     new_height = height / 4;
     size_t global_work_size[2] = { new_width, new_height };
@@ -811,6 +809,8 @@ void stereo_disparity_opencl(const char* left_image_path, const char* right_imag
 
 	cl_mem occlusion_buf = clCreateBuffer(context, CL_MEM_READ_WRITE, new_width * new_height * sizeof(unsigned char), NULL, &err);
 	check_error(err, "Creating Occlusion Buffer");
+
+    double start_time = omp_get_wtime();
 
     // resize left image
     clSetKernelArg(resize_kernel, 0, sizeof(cl_mem), &left_buf);
@@ -905,7 +905,7 @@ void stereo_disparity_opencl(const char* left_image_path, const char* right_imag
 
     // execution time 0.15 seconds with RTX 3060ti
     double end_time = omp_get_wtime();
-    printf("Execution time %f seconds\n", end_time - start_time);
+    printf("Opencl execution time %f seconds\n", end_time - start_time);
 
 	// save output image
     WriteImage(output_path, disparity_map, new_width, new_height);
@@ -939,6 +939,8 @@ void stereo_disparity_opencl(const char* left_image_path, const char* right_imag
 }
 
 int main() {
+    //matrix_addtion_test();
     stereo_disparity_opencl("im0.png", "im1.png", "disparity_opencl.png");
+    //stereo_disparity_cpp();
     return 0;
 }
