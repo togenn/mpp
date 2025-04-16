@@ -736,7 +736,7 @@ void stereo_disparity_cpp() {
     free(consolidated_disparity);
 }
 
-void stereo_disparity_opencl(const char* left_image_path, const char* right_image_path, const char* output_path) {
+double stereo_disparity_opencl(const char* left_image_path, const char* right_image_path, const char* output_path) {
     unsigned width = 0, height = 0;
     unsigned new_width = 0, new_height = 0;
     unsigned int window_size = WINDOW_SIZE;
@@ -840,6 +840,9 @@ void stereo_disparity_opencl(const char* left_image_path, const char* right_imag
     clSetKernelArg(grayscale_kernel, 3, sizeof(int), &new_height);
     check_error(clEnqueueNDRangeKernel(queue, grayscale_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL), "Running Grayscale Kernel on Right Image");
 
+    size_t local_work_size_zncc[2] = { 16, 16 };
+    size_t global_work_size_zncc[2] = { ((new_width + 15) / 16) * 16, ((new_height + 15) / 16) * 16 };
+
     // compute disparity left to right
     int reverse = 0;
     clSetKernelArg(zncc_kernel, 0, sizeof(cl_mem), &gray_left_buf);
@@ -850,7 +853,7 @@ void stereo_disparity_opencl(const char* left_image_path, const char* right_imag
     clSetKernelArg(zncc_kernel, 5, sizeof(unsigned int), &window_size);
     clSetKernelArg(zncc_kernel, 6, sizeof(int), &max_disp);
     clSetKernelArg(zncc_kernel, 7, sizeof(int), &reverse);
-    check_error(clEnqueueNDRangeKernel(queue, zncc_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL), "Running ZNCC Kernel (Left->Right)");
+    check_error(clEnqueueNDRangeKernel(queue, zncc_kernel, 2, NULL, global_work_size_zncc, local_work_size_zncc, 0, NULL, NULL), "Running ZNCC Kernel (Left->Right)");
 
     /*
     unsigned char* disparity_map_LR = (unsigned char*)malloc(new_width * new_height * sizeof(unsigned char));
@@ -868,7 +871,7 @@ void stereo_disparity_opencl(const char* left_image_path, const char* right_imag
     clSetKernelArg(zncc_kernel, 5, sizeof(unsigned int), &window_size);
     clSetKernelArg(zncc_kernel, 6, sizeof(int), &max_disp);
     clSetKernelArg(zncc_kernel, 7, sizeof(int), &reverse);
-    check_error(clEnqueueNDRangeKernel(queue, zncc_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL), "Running ZNCC Kernel (Right->Left)");
+    check_error(clEnqueueNDRangeKernel(queue, zncc_kernel, 2, NULL, global_work_size_zncc, local_work_size_zncc, 0, NULL, NULL), "Running ZNCC Kernel (Right->Left)");
 
     /*
     unsigned char* disparity_map_RL = (unsigned char*)malloc(new_width * new_height * sizeof(unsigned char));
@@ -905,6 +908,7 @@ void stereo_disparity_opencl(const char* left_image_path, const char* right_imag
 
     // execution time 0.15 seconds with RTX 3060ti
     double end_time = omp_get_wtime();
+    double run_time = end_time - start_time;
     printf("Opencl execution time %f seconds\n", end_time - start_time);
 
 	// save output image
@@ -936,11 +940,21 @@ void stereo_disparity_opencl(const char* left_image_path, const char* right_imag
     clReleaseProgram(occlusion_program);
     clReleaseCommandQueue(queue);
     clReleaseContext(context);
+
+    return run_time;
 }
 
 int main() {
-    //matrix_addtion_test();
-    stereo_disparity_opencl("im0.png", "im1.png", "disparity_opencl.png");
-    //stereo_disparity_cpp();
+    double total_time = 0.0;
+
+    for (int i = 0; i < 10; ++i) {
+        printf("Run %d:\n", i + 1);
+        double exec_time = stereo_disparity_opencl("im0.png", "im1.png", "disparity_opencl.png");
+        total_time += exec_time;
+    }
+
+    double average_time = total_time / 10.0;
+    printf("Average OpenCL execution time over 10 runs: %f ms\n", 1000 * average_time);
+
     return 0;
 }
