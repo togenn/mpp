@@ -880,7 +880,7 @@ double stereo_disparity_opencl(const char* left_image_path, const char* right_im
     */
 
 	// cross-check disparity maps
-    int threshold = 128;
+    int threshold = 4;
     clSetKernelArg(cross_check_kernel, 0, sizeof(cl_mem), &disparity_buf_LR);
     clSetKernelArg(cross_check_kernel, 1, sizeof(cl_mem), &disparity_buf_RL);
     clSetKernelArg(cross_check_kernel, 2, sizeof(cl_mem), &cross_checked_disparity_buf);
@@ -889,11 +889,11 @@ double stereo_disparity_opencl(const char* left_image_path, const char* right_im
     clSetKernelArg(cross_check_kernel, 5, sizeof(int), &threshold);
     check_error(clEnqueueNDRangeKernel(queue, cross_check_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL), "Running Cross-Check Kernel");
 
-    /*
+    
 	unsigned char* cross_checked_disparity_map = (unsigned char*)malloc(new_width * new_height * sizeof(unsigned char));
 	check_error(clEnqueueReadBuffer(queue, cross_checked_disparity_buf, CL_TRUE, 0, new_width* new_height * sizeof(unsigned char), cross_checked_disparity_map, 0, NULL, NULL), "Reading Cross-Checked Disparity Buffer");
 	WriteImage("cross_checked_disparity.png", cross_checked_disparity_map, new_width, new_height);
-    */
+    
    
     // apply occlusion filling
     clSetKernelArg(occlusion_kernel, 0, sizeof(cl_mem), &cross_checked_disparity_buf);
@@ -918,6 +918,7 @@ double stereo_disparity_opencl(const char* left_image_path, const char* right_im
     free(left_image);
     free(right_image);
     free(disparity_map);
+	free(cross_checked_disparity_map);
     clReleaseMemObject(left_buf);
     clReleaseMemObject(right_buf);
     clReleaseMemObject(resized_left_buf);
