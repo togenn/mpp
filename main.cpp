@@ -22,6 +22,23 @@
 #define WINDOW_SIZE 9
 #define MAX_DISPARITY (260 / 4)
 
+struct KernelTimes {
+    double resize_left_time;
+    double resize_right_time;
+    double grayscale_left_time;
+    double grayscale_right_time;
+    double zncc_lr_time;
+    double zncc_rl_time;
+    double cross_check_time;
+    double occlusion_time;
+    double total_run_time;
+
+    KernelTimes() : resize_left_time(0.0), resize_right_time(0.0), grayscale_left_time(0.0),
+        grayscale_right_time(0.0), zncc_lr_time(0.0), zncc_rl_time(0.0),
+        cross_check_time(0.0), occlusion_time(0.0), total_run_time(0.0) {
+    }
+};
+
 void displayPlatformInfo(cl_platform_id platform, cl_platform_info param_name, const char* param_str) {
     char info[MAX_INFO_SIZE];
     size_t info_size;
@@ -736,7 +753,7 @@ void stereo_disparity_cpp() {
     free(consolidated_disparity);
 }
 
-double stereo_disparity_opencl(const char* left_image_path, const char* right_image_path, const char* output_path) {
+KernelTimes stereo_disparity_opencl(const char* left_image_path, const char* right_image_path, const char* output_path) {
     unsigned width = 0, height = 0;
     unsigned new_width = 0, new_height = 0;
     unsigned int window_size = WINDOW_SIZE;
@@ -764,26 +781,26 @@ double stereo_disparity_opencl(const char* left_image_path, const char* right_im
     queue = clCreateCommandQueueWithProperties(context, device, props, &err);
     check_error(err, "Creating Queue");
 
-    // load and compile kernel programs
+    // Load and compile kernel programs
     cl_program resize_program = build_opencl_program(context, device, "resize.cl");
     cl_program grayscale_program = build_opencl_program(context, device, "grayscale.cl");
     cl_program zncc_program = build_opencl_program(context, device, "zncc_kernel.cl");
-	cl_program cross_check_program = build_opencl_program(context, device, "cross_check_kernel.cl");
+    cl_program cross_check_program = build_opencl_program(context, device, "cross_check_kernel.cl");
     cl_program occlusion_program = build_opencl_program(context, device, "occlusion_fill_kernel.cl");
 
-    // create kernels
+    // Create kernels
     cl_kernel resize_kernel = clCreateKernel(resize_program, "resize_image", &err);
     check_error(err, "Creating Resize Kernel");
     cl_kernel grayscale_kernel = clCreateKernel(grayscale_program, "grayscale_image", &err);
     check_error(err, "Creating Grayscale Kernel");
     cl_kernel zncc_kernel = clCreateKernel(zncc_program, "zncc_kernel", &err);
     check_error(err, "Creating ZNCC Kernel");
-	cl_kernel cross_check_kernel = clCreateKernel(cross_check_program, "cross_check_disparity", &err);
-	check_error(err, "Creating Cross Check Kernel");
-	cl_kernel occlusion_kernel = clCreateKernel(occlusion_program, "occlusion_filling", &err);
-	check_error(err, "Creating Occlusion Fill Kernel");
+    cl_kernel cross_check_kernel = clCreateKernel(cross_check_program, "cross_check_disparity", &err);
+    check_error(err, "Creating Cross Check Kernel");
+    cl_kernel occlusion_kernel = clCreateKernel(occlusion_program, "occlusion_filling", &err);
+    check_error(err, "Creating Occlusion Fill Kernel");
 
-    // create buffers
+    // Create buffers
     cl_mem left_buf = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, width * height * sizeof(cl_uchar4), left_image, &err);
     check_error(err, "Creating Left Buffer");
     cl_mem right_buf = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, width * height * sizeof(cl_uchar4), right_image, &err);
@@ -807,43 +824,71 @@ double stereo_disparity_opencl(const char* left_image_path, const char* right_im
     cl_mem cross_checked_disparity_buf = clCreateBuffer(context, CL_MEM_WRITE_ONLY, new_width * new_height * sizeof(unsigned char), NULL, &err);
     check_error(err, "Creating Cross-Checked Disparity Buffer");
 
-	cl_mem occlusion_buf = clCreateBuffer(context, CL_MEM_READ_WRITE, new_width * new_height * sizeof(unsigned char), NULL, &err);
-	check_error(err, "Creating Occlusion Buffer");
+    cl_mem occlusion_buf = clCreateBuffer(context, CL_MEM_READ_WRITE, new_width * new_height * sizeof(unsigned char), NULL, &err);
+    check_error(err, "Creating Occlusion Buffer");
 
+    KernelTimes times;
     double start_time = omp_get_wtime();
 
-    // resize left image
+    // Resize left image
     clSetKernelArg(resize_kernel, 0, sizeof(cl_mem), &left_buf);
     clSetKernelArg(resize_kernel, 1, sizeof(cl_mem), &resized_left_buf);
     clSetKernelArg(resize_kernel, 2, sizeof(int), &width);
     clSetKernelArg(resize_kernel, 3, sizeof(int), &height);
     clSetKernelArg(resize_kernel, 4, sizeof(int), &new_width);
     clSetKernelArg(resize_kernel, 5, sizeof(int), &new_height);
-    check_error(clEnqueueNDRangeKernel(queue, resize_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL), "Running Resize Kernel on Left Image");
+    cl_event resize_left_event;
+    check_error(clEnqueueNDRangeKernel(queue, resize_kernel, 2, NULL, global_work_size, NULL, 0, NULL, &resize_left_event), "Running Resize Kernel on Left Image");
+    clWaitForEvents(1, &resize_left_event);
+    cl_ulong start, end;
+    clGetEventProfilingInfo(resize_left_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+    clGetEventProfilingInfo(resize_left_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+    times.resize_left_time = (end - start) * 1.0e-6;
+    //printf("Resize Left Kernel: %f ms\n", times.resize_left_time);
+    clReleaseEvent(resize_left_event);
 
-    // resize right image
+    // Resize right image
     clSetKernelArg(resize_kernel, 0, sizeof(cl_mem), &right_buf);
     clSetKernelArg(resize_kernel, 1, sizeof(cl_mem), &resized_right_buf);
-    check_error(clEnqueueNDRangeKernel(queue, resize_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL), "Running Resize Kernel on Right Image");
+    cl_event resize_right_event;
+    check_error(clEnqueueNDRangeKernel(queue, resize_kernel, 2, NULL, global_work_size, NULL, 0, NULL, &resize_right_event), "Running Resize Kernel on Right Image");
+    clWaitForEvents(1, &resize_right_event);
+    clGetEventProfilingInfo(resize_right_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+    clGetEventProfilingInfo(resize_right_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+    times.resize_right_time = (end - start) * 1.0e-6;
+    //printf("Resize Right Kernel: %f ms\n", times.resize_right_time);
+    clReleaseEvent(resize_right_event);
 
-    // convert left image to grayscale
+    // Convert left image to grayscale
     clSetKernelArg(grayscale_kernel, 0, sizeof(cl_mem), &resized_left_buf);
     clSetKernelArg(grayscale_kernel, 1, sizeof(cl_mem), &gray_left_buf);
     clSetKernelArg(grayscale_kernel, 2, sizeof(int), &new_width);
     clSetKernelArg(grayscale_kernel, 3, sizeof(int), &new_height);
-    check_error(clEnqueueNDRangeKernel(queue, grayscale_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL), "Running Grayscale Kernel on Left Image");
+    cl_event grayscale_left_event;
+    check_error(clEnqueueNDRangeKernel(queue, grayscale_kernel, 2, NULL, global_work_size, NULL, 0, NULL, &grayscale_left_event), "Running Grayscale Kernel on Left Image");
+    clWaitForEvents(1, &grayscale_left_event);
+    clGetEventProfilingInfo(grayscale_left_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+    clGetEventProfilingInfo(grayscale_left_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+    times.grayscale_left_time = (end - start) * 1.0e-6;
+    //printf("Grayscale Left Kernel: %f ms\n", times.grayscale_left_time);
+    clReleaseEvent(grayscale_left_event);
 
-    // convert right image to grayscale
+    // Convert right image to grayscale
     clSetKernelArg(grayscale_kernel, 0, sizeof(cl_mem), &resized_right_buf);
     clSetKernelArg(grayscale_kernel, 1, sizeof(cl_mem), &gray_right_buf);
-    clSetKernelArg(grayscale_kernel, 2, sizeof(int), &new_width);
-    clSetKernelArg(grayscale_kernel, 3, sizeof(int), &new_height);
-    check_error(clEnqueueNDRangeKernel(queue, grayscale_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL), "Running Grayscale Kernel on Right Image");
+    cl_event grayscale_right_event;
+    check_error(clEnqueueNDRangeKernel(queue, grayscale_kernel, 2, NULL, global_work_size, NULL, 0, NULL, &grayscale_right_event), "Running Grayscale Kernel on Right Image");
+    clWaitForEvents(1, &grayscale_right_event);
+    clGetEventProfilingInfo(grayscale_right_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+    clGetEventProfilingInfo(grayscale_right_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+    times.grayscale_right_time = (end - start) * 1.0e-6;
+    //printf("Grayscale Right Kernel: %f ms\n", times.grayscale_right_time);
+    clReleaseEvent(grayscale_right_event);
 
     size_t local_work_size_zncc[2] = { 16, 16 };
     size_t global_work_size_zncc[2] = { ((new_width + 15) / 16) * 16, ((new_height + 15) / 16) * 16 };
 
-    // compute disparity left to right
+    // Compute disparity left to right
     int reverse = 0;
     clSetKernelArg(zncc_kernel, 0, sizeof(cl_mem), &gray_left_buf);
     clSetKernelArg(zncc_kernel, 1, sizeof(cl_mem), &gray_right_buf);
@@ -853,16 +898,17 @@ double stereo_disparity_opencl(const char* left_image_path, const char* right_im
     clSetKernelArg(zncc_kernel, 5, sizeof(unsigned int), &window_size);
     clSetKernelArg(zncc_kernel, 6, sizeof(int), &max_disp);
     clSetKernelArg(zncc_kernel, 7, sizeof(int), &reverse);
-    check_error(clEnqueueNDRangeKernel(queue, zncc_kernel, 2, NULL, global_work_size_zncc, local_work_size_zncc, 0, NULL, NULL), "Running ZNCC Kernel (Left->Right)");
+    cl_event zncc_lr_event;
+    check_error(clEnqueueNDRangeKernel(queue, zncc_kernel, 2, NULL, global_work_size_zncc, local_work_size_zncc, 0, NULL, &zncc_lr_event), "Running ZNCC Kernel (Left->Right)");
+    clWaitForEvents(1, &zncc_lr_event);
+    clGetEventProfilingInfo(zncc_lr_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+    clGetEventProfilingInfo(zncc_lr_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+    times.zncc_lr_time = (end - start) * 1.0e-6;
+    //printf("ZNCC Left-to-Right Kernel: %f ms\n", times.zncc_lr_time);
+    clReleaseEvent(zncc_lr_event);
 
-    /*
-    unsigned char* disparity_map_LR = (unsigned char*)malloc(new_width * new_height * sizeof(unsigned char));
-    check_error(clEnqueueReadBuffer(queue, disparity_buf_LR, CL_TRUE, 0, new_width* new_height * sizeof(unsigned char), disparity_map_LR, 0, NULL, NULL), "Reading Left->Right Disparity Buffer");
-	WriteImage("disparity_LR.png", disparity_map_LR, new_width, new_height);
-    */
-
-    // compute disparity right to left
-	reverse = 1;
+    // Compute disparity right to left
+    reverse = 1;
     clSetKernelArg(zncc_kernel, 0, sizeof(cl_mem), &gray_right_buf);
     clSetKernelArg(zncc_kernel, 1, sizeof(cl_mem), &gray_left_buf);
     clSetKernelArg(zncc_kernel, 2, sizeof(cl_mem), &disparity_buf_RL);
@@ -871,15 +917,16 @@ double stereo_disparity_opencl(const char* left_image_path, const char* right_im
     clSetKernelArg(zncc_kernel, 5, sizeof(unsigned int), &window_size);
     clSetKernelArg(zncc_kernel, 6, sizeof(int), &max_disp);
     clSetKernelArg(zncc_kernel, 7, sizeof(int), &reverse);
-    check_error(clEnqueueNDRangeKernel(queue, zncc_kernel, 2, NULL, global_work_size_zncc, local_work_size_zncc, 0, NULL, NULL), "Running ZNCC Kernel (Right->Left)");
+    cl_event zncc_rl_event;
+    check_error(clEnqueueNDRangeKernel(queue, zncc_kernel, 2, NULL, global_work_size_zncc, local_work_size_zncc, 0, NULL, &zncc_rl_event), "Running ZNCC Kernel (Right->Left)");
+    clWaitForEvents(1, &zncc_rl_event);
+    clGetEventProfilingInfo(zncc_rl_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+    clGetEventProfilingInfo(zncc_rl_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+    times.zncc_rl_time = (end - start) * 1.0e-6;
+    //printf("ZNCC Right-to-Left Kernel: %f ms\n", times.zncc_rl_time);
+    clReleaseEvent(zncc_rl_event);
 
-    /*
-    unsigned char* disparity_map_RL = (unsigned char*)malloc(new_width * new_height * sizeof(unsigned char));
-    check_error(clEnqueueReadBuffer(queue, disparity_buf_RL, CL_TRUE, 0, new_width* new_height * sizeof(unsigned char), disparity_map_RL, 0, NULL, NULL), "Reading Right->Left Disparity Buffer");
-	WriteImage("disparity_RL.png", disparity_map_RL, new_width, new_height);
-    */
-
-	// cross-check disparity maps
+    // Cross-check disparity maps
     int threshold = 4;
     clSetKernelArg(cross_check_kernel, 0, sizeof(cl_mem), &disparity_buf_LR);
     clSetKernelArg(cross_check_kernel, 1, sizeof(cl_mem), &disparity_buf_RL);
@@ -887,38 +934,50 @@ double stereo_disparity_opencl(const char* left_image_path, const char* right_im
     clSetKernelArg(cross_check_kernel, 3, sizeof(int), &new_width);
     clSetKernelArg(cross_check_kernel, 4, sizeof(int), &new_height);
     clSetKernelArg(cross_check_kernel, 5, sizeof(int), &threshold);
-    check_error(clEnqueueNDRangeKernel(queue, cross_check_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL), "Running Cross-Check Kernel");
+    cl_event cross_check_event;
+    check_error(clEnqueueNDRangeKernel(queue, cross_check_kernel, 2, NULL, global_work_size, NULL, 0, NULL, &cross_check_event), "Running Cross-Check Kernel");
+    clWaitForEvents(1, &cross_check_event);
+    clGetEventProfilingInfo(cross_check_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+    clGetEventProfilingInfo(cross_check_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+    times.cross_check_time = (end - start) * 1.0e-6;
+    //printf("Cross-Check Kernel: %f ms\n", times.cross_check_time);
+    clReleaseEvent(cross_check_event);
 
-    
-	unsigned char* cross_checked_disparity_map = (unsigned char*)malloc(new_width * new_height * sizeof(unsigned char));
-	check_error(clEnqueueReadBuffer(queue, cross_checked_disparity_buf, CL_TRUE, 0, new_width* new_height * sizeof(unsigned char), cross_checked_disparity_map, 0, NULL, NULL), "Reading Cross-Checked Disparity Buffer");
-	WriteImage("cross_checked_disparity.png", cross_checked_disparity_map, new_width, new_height);
-    
-   
-    // apply occlusion filling
+    unsigned char* cross_checked_disparity_map = (unsigned char*)malloc(new_width * new_height * sizeof(unsigned char));
+    check_error(clEnqueueReadBuffer(queue, cross_checked_disparity_buf, CL_TRUE, 0, new_width * new_height * sizeof(unsigned char), cross_checked_disparity_map, 0, NULL, NULL), "Reading Cross-Checked Disparity Buffer");
+    WriteImage("cross_checked_disparity.png", cross_checked_disparity_map, new_width, new_height);
+
+    // Apply occlusion filling
     clSetKernelArg(occlusion_kernel, 0, sizeof(cl_mem), &cross_checked_disparity_buf);
-	clSetKernelArg(occlusion_kernel, 1, sizeof(cl_mem), &occlusion_buf);
+    clSetKernelArg(occlusion_kernel, 1, sizeof(cl_mem), &occlusion_buf);
     clSetKernelArg(occlusion_kernel, 2, sizeof(int), &new_width);
     clSetKernelArg(occlusion_kernel, 3, sizeof(int), &new_height);
-    check_error(clEnqueueNDRangeKernel(queue, occlusion_kernel, 2, NULL, global_work_size, NULL, 0, NULL, NULL), "Running Occlusion Fill Kernel");
+    cl_event occlusion_event;
+    check_error(clEnqueueNDRangeKernel(queue, occlusion_kernel, 2, NULL, global_work_size_zncc, local_work_size_zncc, 0, NULL, &occlusion_event), "Running Occlusion Fill Kernel");
+    clWaitForEvents(1, &occlusion_event);
+    clGetEventProfilingInfo(occlusion_event, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &start, NULL);
+    clGetEventProfilingInfo(occlusion_event, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &end, NULL);
+    times.occlusion_time = (end - start) * 1.0e-6;
+    //printf("Occlusion Fill Kernel: %f ms\n", times.occlusion_time);
+    clReleaseEvent(occlusion_event);
 
-    // read disparity map
+    // Read disparity map
     unsigned char* disparity_map = (unsigned char*)malloc(new_width * new_height * sizeof(unsigned char));
-    check_error(clEnqueueReadBuffer(queue, occlusion_buf, CL_TRUE, 0, new_width* new_height * sizeof(unsigned char), disparity_map, 0, NULL, NULL), "Reading Occlusion Buffer");
+    check_error(clEnqueueReadBuffer(queue, occlusion_buf, CL_TRUE, 0, new_width * new_height * sizeof(unsigned char), disparity_map, 0, NULL, NULL), "Reading Occlusion Buffer");
 
-    // execution time 0.15 seconds with RTX 3060ti
+    // Log total execution time
     double end_time = omp_get_wtime();
-    double run_time = end_time - start_time;
-    printf("Opencl execution time %f seconds\n", end_time - start_time);
+    times.total_run_time = end_time - start_time;
+    //printf("OpenCL execution time %f seconds\n", times.total_run_time);
 
-	// save output image
+    // Save output image
     WriteImage(output_path, disparity_map, new_width, new_height);
 
-    // cleaning up
+    // Clean up
     free(left_image);
     free(right_image);
     free(disparity_map);
-	free(cross_checked_disparity_map);
+    free(cross_checked_disparity_map);
     clReleaseMemObject(left_buf);
     clReleaseMemObject(right_buf);
     clReleaseMemObject(resized_left_buf);
@@ -942,20 +1001,36 @@ double stereo_disparity_opencl(const char* left_image_path, const char* right_im
     clReleaseCommandQueue(queue);
     clReleaseContext(context);
 
-    return run_time;
+    return times;
 }
 
 int main() {
-    double total_time = 0.0;
+    KernelTimes total_times;
 
     for (int i = 0; i < 10; ++i) {
         printf("Run %d:\n", i + 1);
-        double exec_time = stereo_disparity_opencl("im0.png", "im1.png", "disparity_opencl.png");
-        total_time += exec_time;
+        KernelTimes times = stereo_disparity_opencl("im0.png", "im1.png", "disparity_opencl.png");
+        total_times.resize_left_time += times.resize_left_time;
+        total_times.resize_right_time += times.resize_right_time;
+        total_times.grayscale_left_time += times.grayscale_left_time;
+        total_times.grayscale_right_time += times.grayscale_right_time;
+        total_times.zncc_lr_time += times.zncc_lr_time;
+        total_times.zncc_rl_time += times.zncc_rl_time;
+        total_times.cross_check_time += times.cross_check_time;
+        total_times.occlusion_time += times.occlusion_time;
+        total_times.total_run_time += times.total_run_time;
     }
 
-    double average_time = total_time / 10.0;
-    printf("Average OpenCL execution time over 10 runs: %f ms\n", 1000 * average_time);
+    printf("\nAverage Times Over 10 Runs:\n");
+    printf("Average Resize Left Kernel: %f ms\n", total_times.resize_left_time / 10.0);
+    printf("Average Resize Right Kernel: %f ms\n", total_times.resize_right_time / 10.0);
+    printf("Average Grayscale Left Kernel: %f ms\n", total_times.grayscale_left_time / 10.0);
+    printf("Average Grayscale Right Kernel: %f ms\n", total_times.grayscale_right_time / 10.0);
+    printf("Average ZNCC Left-to-Right Kernel: %f ms\n", total_times.zncc_lr_time / 10.0);
+    printf("Average ZNCC Right-to-Left Kernel: %f ms\n", total_times.zncc_rl_time / 10.0);
+    printf("Average Cross-Check Kernel: %f ms\n", total_times.cross_check_time / 10.0);
+    printf("Average Occlusion Fill Kernel: %f ms\n", total_times.occlusion_time / 10.0);
+    printf("Average OpenCL Execution Time: %f ms\n", (total_times.total_run_time / 10.0) * 1000.0);
 
     return 0;
 }
